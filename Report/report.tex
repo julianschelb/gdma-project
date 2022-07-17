@@ -29,31 +29,31 @@ This chapter describes design decisions made to map the relational CDDB database
 \end{figure}
 
 \subsection{Mappping of Tables}
-Entries in tables \name{artists}, \name{albums}, \name{songs} and \name{cds} represent entities and are mapped to nodes of appropriate type. The cross table  \name{cdtracks} is mapped as relations between CDs and Songs with the property \name{track}. The cross table  \name{artist2album} is mapped as a triangular relationships, using six relations each to connect Artists, Albums and CDs in both directions.
+Entries in tables \name{artists}, \name{albums}, \name{songs} and \name{cds} represent entities and are mapped to nodes of appropriate type. The cross table  \name{cdtracks} is mapped as relations between CDs and Songs with the property \name{track}. The cross table  \name{artist2album} is mapped as a triangular relationship, using six relations each to connect Artists, Albums and CDs in both directions.
 
 \subsection{Bidirectional Relations}
 
-To consgtruct the queries necessary for subsequent tasks, it was structly speaking not necessary to create relations for both directions. However, doing so allows for more readable queries. In addition, the relational SQL database does not define a direction for relations either, and this property is thereby preserved.
+To construct the queries necessary for subsequent tasks, it was strictly speaking not necessary to create relations for both directions. However, doing so allows for more readable queries. In addition, the relational SQL database does not define a direction for relations either, and this property is thereby preserved.
 
 \subsection{Unique Identifiers}
-The unique identifiers present in the SQL database are preserved as node properties. Although Neo4j automatically assigns different IDs internally, this preserves compatibility with the SQL version. It is conceivable that in the real worlds, queries may reference those IDs directly. For example as hardcoded list as part of a GUI.
+The unique identifiers present in the SQL database are preserved as node properties. Although Neo4j automatically assigns different IDs internally, this preserves compatibility with the SQL version. It is conceivable that in the real worlds, queries may reference those IDs directly. For example, as hardcoded list as part of a GUI.
 
 \subsection{Entity Names}
-As in the SQL version, the actual name of a \name{song}, \name{genre}, \name{album} and \name{artist} is a property named after the entity type and therefore different per node label. This was done to map the SQL version as closely as possible to the graph version. In real world scenarios it may be beneficial to rename these properties to \name{name} across all nodes. This would allow for simpler queries in cases where nodes of different types are filtered by name. Also, a joint full-text index would be possible.
+As in the SQL version, the actual name of a \name{song}, \name{genre}, \name{album} and \name{artist} is a property named after the entity type and therefore different per node label. This was done to map the SQL version as closely as possible to the graph version. In real-world scenarios, it may be beneficial to rename these properties to \name{name} across all nodes. This would allow for simpler queries in cases where nodes of different types are filtered by name. Also, a joint full-text index would be possible.
 
 \subsection{Indices}
-To speed up \texttt{MERGE} and \texttt{MATCH} operations, the IDs for nodes with label \name{Artist}, \name{Album}, \name{Genre}, \name{Song} or \name{CD} are indexed. In addition, a full text index is used for the names of \name{Artists}, \name{Albums} and \name{Songs} to allow for imprecise searches (fuzzy search).
+To speed up \texttt{MERGE} and \texttt{MATCH} operations, the IDs for nodes with label \name{Artist}, \name{Album}, \name{Genre}, \name{Song} or \name{CD} are indexed. In addition, a full-text index is used for the names of \name{Artists}, \name{Albums} and \name{Songs} to allow for imprecise searches (fuzzy search).
 
 \subsection{Importing Songs}
 
-Songs with a trailing backslashcoused problems because the closing quote is escaped. To mitigate this, an extra whitespace character is added to those song titles. Effected rows can be found with the following sql statement:
+Songs with a trailing backslash caused problems because the closing quote is escaped. To mitigate this, an extra whitespace character is added to those song titles. Affected rows can be found with the following SQL statement:
 
 
 \begin{lstlisting}[language=sql]
     SELECT * 
     from cddb.songs s 
     where song like '%\\' 
-      and song not like '%\\\\'
+        and song not like '%\\\\'
 \end{lstlisting}
 
 Statement to update the rows:
@@ -62,7 +62,7 @@ Statement to update the rows:
     UPDATE cddb.songs 
     SET song = song || ' ' 
     WHERE song LIKE '%\\' 
-      AND song NOT LIKE '%\\\\'
+        AND song NOT LIKE '%\\\\'
 \end{lstlisting}
 
 
@@ -85,7 +85,7 @@ See Jupyter notebook \path{04_Searching_and_Ranking.ipynb}.
 \vspace*{0.1cm}
 
 \noindent
-The search accepts a user supplied query string and returns an ordered list of the most relevant CDs. Three features are considered to rank CDs by relevance: Text similarity with the query string, user-preferred CDs and user-preferred genres. Since the user's preference is known prior to searching, the corresponding preference scores can be computed in advance. This leads to a two stage process:
+The search engine accepts a user supplied query string and returns an ordered list of the most relevant CDs. Three features are considered to rank CDs by relevance: Text similarity with the query string, user-preferred CDs and user-preferred genres. Since the user's preference is known prior to searching, the corresponding preference scores can be computed in advance. This leads to a two stage process:
 
 
 \subsubsection{Stage 1: Precompute User Preference}
@@ -101,7 +101,7 @@ Preferred CDs and genres are determined based on content previously liked by the
 The most significant feature is the text similarity to the search query provided by the user. By using "Full-Text Indices" of Neo4J, the text similarity between artist name, album title and song title is calculated. The similarity score of all nodes associated with a CD are aggregated and used as a "Content Match Score".
 
 \begin{equation}
-    S_{Combined}= S_{Content} + (S_{CD}  * S_{Content} ) + (S_{Genre} * S_{Content} )
+    S_{Combined}= S_{Content} + (S_{CD}  * S_{Content} ) + (S_{Genre} * S_{Content} )
 \end{equation}
 
 \vspace*{0.5cm}
@@ -141,7 +141,7 @@ See Jupyter notebook \path{05_Search_Demonstration.ipynb} for more detailed exam
 
     # Search for relevant CDs
     searchFor(driver, database_name = "cddb", 
-              user_id, search_input, search_mask)
+            user_id, search_input, search_mask)
 \end{lstlisting}
 
 \begin{table}[!htbp]
