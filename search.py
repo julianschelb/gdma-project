@@ -1,293 +1,377 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# # GDMA Project
-# Author: Julian Schelb (1069967)
-
-# In[1]:
-
 
 from neo4j import GraphDatabase
-import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 
 
-# ### Connection to the database instance
+class SearchEngine():
 
-# In[2]:
+    def __init__(self, url="bolt://localhost:7687", user="neo4j",
+                 password="", database_name="cddb"):
 
-
-class Search():
-    
-    def __init__(self, url = "bolt://localhost:7687", user = "neo4j", password = "", database_name = "cddb"):
-    
         self.driver = GraphDatabase.driver(url, auth=(user, password))
         self.database_name = database_name
-        self.session = self.driver.session(database = database_name)
+        self.session = self.driver.session(database=database_name)
 
-        
-    def createUser(self, user_id: int = 1):
+    # ---------------------------------------------------------------------------
+    #                            CREATE EXAMPLE USER
+    # ---------------------------------------------------------------------------
 
-        query_create_user = """
+    def createUser(self, user_id: int = None):
+
+        if type(user_id) is not int:
+            raise TypeError('User ID must be a Number')
+        if user_id < 0:
+            raise ValueError('User ID must be a positive Number')
+
+        query = """
         MERGE (u:User {id:  $user_id})
         RETURN u.id as user_id
         """
 
-        self.session.run(query_create_user, user_id = user_id)
+        with self.driver.session(database=self.database_name) as session:
+            session.run(query, user_id=user_id)
 
+    # ---------------------------------------------------------------------------
 
+    def deleteUser(self, user_id: int = None):
 
-    def deletePrefProj(self):
+        if type(user_id) is not int:
+            raise TypeError('User ID must be a Number')
+        if user_id < 0:
+            raise ValueError('User ID must be a positive Number')
 
-        query_pref_delete_proj = """
-        // DELETE EXISTING PROJECTION
-        CALL gds.graph.drop('searchdomain_preference', false) 
-        YIELD graphName 
+        query = """
+        MATCH (u:User)
+        WHERE u.id = $user_id
+        DETACH DELETE u
+        """
+
+        with self.driver.session(database=self.database_name) as session:
+            session.run(query, user_id=user_id)
+
+    # ---------------------------------------------------------------------------
+
+    def addLike(self, user_id: int = None, node_id: int = None, node_label: str = None):
+
+        # Validate user_id
+        if type(user_id) is not int:
+            raise TypeError('User ID must be a Number')
+        if user_id < 0:
+            raise ValueError('User ID must be a positive Number')
+
+        # Validate node_id
+        if type(node_id) is not int:
+            raise TypeError('Node ID must be a Number')
+        if node_id < 0:
+            raise ValueError('Node ID must be a positive Number')
+
+        # Validate node_label
+        if node_label not in ["Song", "Album", "Artist"]:
+            raise ValueError('Node type must be Song, Album or Artist')
+
+        self.createUser(user_id=user_id)
+
+        query = f"""
+        MATCH (u:User)
+        WHERE u.id = {user_id}
+        MATCH (n: {node_label})
+        WHERE n.id = {node_id}
+        MERGE (u)-[r:LIKES]->(n)
+        """
+
+        with self.driver.session(database=self.database_name) as session:
+            session.run(query)
+
+    # ---------------------------------------------------------------------------
+
+    def createExampleUser(self, user_id: int = 1, genre: str = "rock", limit: int = 50):
+
+        ####### CREATE USER #######
+
+        self.deleteUser(user_id=user_id)
+        self.createUser(user_id=user_id)
+
+        ####### LIKE SONGS #######
+
+        query = """
+        MATCH (g:Genre)<-[r:BELONGS_TO]-(c:CD)
+        MATCH (c)-[r2:CONTAINS]->(s:Song)
+        WHERE g.genre = $genre
+        WITH DISTINCT s
+        LIMIT $limit
+        RETURN s.id as id
+        """
+
+        with self.driver.session(database=self.database_name) as session:
+            results = session.run(query, user_id=user_id,
+                                  genre=genre, limit=limit)
+            for row in results:
+                self.addLike(user_id=user_id,
+                             node_id=row["id"], node_label="Song")
+
+        ####### LIKE ALBUMS #######
+
+        query = """
+        MATCH (g:Genre)<-[r:BELONGS_TO]-(c:CD)
+        MATCH (c)-[r2:CONTAINS]->(s:Album)
+        WHERE g.genre = $genre
+        WITH DISTINCT s
+        LIMIT $limit
+        RETURN s.id as id
+        """
+
+        with self.driver.session(database=self.database_name) as session:
+            results = session.run(query, user_id=user_id,
+                                  genre=genre, limit=limit)
+            for row in results:
+                self.addLike(user_id=user_id,
+                             node_id=row["id"], node_label="Album")
+
+        ####### LIKE ARTISTS #######
+
+        query = """
+        MATCH (g:Genre)<-[r:BELONGS_TO]-(c:CD)
+        MATCH (c)-[r2:CONTAINS]->(s:Artist)
+        WHERE g.genre = $genre
+        WITH DISTINCT s
+        LIMIT $limit
+        RETURN s.id as id
+        """
+
+        with self.driver.session(database=self.database_name) as session:
+            results = session.run(query, user_id=user_id,
+                                  genre=genre, limit=limit)
+            for row in results:
+                self.addLike(user_id=user_id,
+                             node_id=row["id"],
+                             node_label="Artist")
+
+    # ---------------------------------------------------------------------------
+    #                            STAGE 1: COMPUTE USER PREFERENCE
+    # ---------------------------------------------------------------------------
+
+    def loadUserPreferences(self, user_id: int = None):
+
+        ####### DELETE EXISTING PROJECTION #######
+
+        query_delete = """
+        CALL gds.graph.drop('searchdomain_preference', false)
+        YIELD graphName
         RETURN graphName
         """
 
-        self.session.run(query_pref_delete_proj)
+        ####### CREATE NEW PROJECTION #######
 
-
-    def createPrefProj(self, user_id: int = 1):
-
-        query_pref_create_proj = f"""
+        query_create = f"""
         // CREATE NEW PROJECTION WITH SEARCH RELEVANT SUB GRAPH
         CALL gds.graph.project.cypher(
           'searchdomain_preference',
+
           ' // Liked Artists, Albums and Songs
-            MATCH (u:User)-[:LIKES]->(n) 
+            MATCH (u:User)-[:LIKES]->(n)
             WHERE u.id = {user_id}
-                AND (n:Song OR n:Album OR n:Artist) 
-            RETURN id(n) AS id, labels(n) AS labels 
-            LIMIT 100000
-
+                AND (n:Song OR n:Album OR n:Artist)
+            RETURN id(n) AS id, labels(n) AS labels
             UNION
-
             // CDs linked to liked Artists, Albums and Songs
-            MATCH (u:User)-[:LIKES]->(x)-[:APPEARED_ON]->(n:CD) 
+            MATCH (u:User)-[:LIKES]->(x)-[:APPEARED_ON]->(n:CD)
             WHERE u.id = {user_id}
-            RETURN id(n) AS id, labels(n) AS labels 
-            LIMIT 100000',
+            RETURN id(n) AS id, labels(n) AS labels ',
 
             'MATCH (u:User)-[:LIKES]->(n)
             WHERE u.id = {user_id}
-            AND (n:CD OR n:Song OR n:Album OR n:Artist) 
-            MATCH (n)-[r:APPEARED_ON]->(m:CD) 
-            RETURN id(n) AS source, id(m) AS target, type(r) AS type 
-            LIMIT 100000' 
+            AND (n:CD OR n:Song OR n:Album OR n:Artist)
+            MATCH (n)-[r:APPEARED_ON]->(m:CD)
+            RETURN id(n) AS source, id(m) AS target, type(r) AS type'
         )
         YIELD
           graphName, nodeCount AS nodes, relationshipCount AS rels
         RETURN graphName, nodes, rels
         """
 
-        self.session.run(query_pref_create_proj)
+        with self.driver.session(database=self.database_name) as session:
+            results = session.run(query_delete)
+            results = session.run(query_create)
 
+    # ---------------------------------------------------------------------------
 
+    def calcPreferredCD(self, user_id: int = None):
 
-    def calcPrefScore(self):
+        ####### CHECK IF PROJECTION EXISTS #######
 
-        # https://neo4j.com/docs/graph-data-science/current/algorithms/eigenvector-centrality/
-        query_pref_calc_score = """
-        CALL gds.eigenvector.mutate('searchdomain_preference',  {
-          mutateProperty: 'score_eig'
-        })
-        YIELD centralityDistribution, nodePropertiesWritten, ranIterations
-        RETURN centralityDistribution.min AS minimumScore, 
-        centralityDistribution.mean AS meanScore, nodePropertiesWritten
+        query_check = """
+        CALL gds.graph.exists("searchdomain_preference")
+        YIELD graphName, exists
+        RETURN graphName, exists
         """
 
-        self.session.run(query_pref_calc_score)
+        ####### DELETE EXISTING RELATIONS #######
 
-
-    def deleteContProj(self):
-
-        query_cont_delete_proj = """
-        // DELETE EXISTING PROJECTION
-        CALL gds.graph.drop('searchdomain_content', false) 
-        YIELD graphName 
-        RETURN graphName
+        query_delete = """
+        WITH $user_id as userID
+        MATCH (:User {id: userID})-[r:PREFERRES]->(c:CD)
+        DELETE r
         """
 
-        self.session.run(query_cont_delete_proj)
+        ####### CREATE NEW RELATIONS #######
 
-
-    def createContProj(self, search_input: str = "", search_mask: str = ""):
-
-        query_cont_create_proj = f"""
-        // CREATE NEW PROJECTION WITH SEARCH RELEVANT SUB GRAPH
-        CALL gds.graph.project.cypher(
-          "searchdomain_content",
-
-          " // Artists, Albums and Songs which match query
-
-                CALL {{
-                    CALL db.index.fulltext.queryNodes('artists', '{search_input}') 
-                    YIELD node, score
-                    WHERE '{search_mask}' = 'all' or '{search_mask}' = 'artists'
-                    RETURN node, score
-                    UNION 
-                    CALL db.index.fulltext.queryNodes('songs', '{search_input}') 
-                    YIELD node, score
-                    WHERE '{search_mask}' = 'all' or '{search_mask}' = 'songs'
-                    RETURN node, score
-                    UNION 
-                    CALL db.index.fulltext.queryNodes('albums', '{search_input}') 
-                    YIELD node, score
-                    WHERE '{search_mask}' = 'all' or '{search_mask}' = 'albums'
-                    RETURN node, score
-                }}
-
-                WITH node, score
-                ORDER BY score desc
-                LIMIT 100
-                MATCH (node)-[r:APPEARED_ON]->(c:CD)
-                RETURN id(node) AS id, labels(node) AS labels 
-
-            UNION
-
-            // CDS linked to Artists, Albums and Songs which match query
-
-                CALL {{
-                    CALL db.index.fulltext.queryNodes('artists', '{search_input}') 
-                    YIELD node, score
-                    WHERE '{search_mask}' = 'all' or '{search_mask}' = 'artists'
-                    RETURN node, score
-                    UNION 
-                    CALL db.index.fulltext.queryNodes('songs', '{search_input}') 
-                    YIELD node, score
-                    WHERE '{search_mask}' = 'all' or '{search_mask}' = 'songs'
-                    RETURN node, score
-                    UNION 
-                    CALL db.index.fulltext.queryNodes('albums', '{search_input}') 
-                    YIELD node, score
-                    WHERE '{search_mask}' = 'all' or '{search_mask}' = 'albums'
-                    RETURN node, score
-                }}
-
-                WITH node, score
-                ORDER BY score desc
-                LIMIT 100
-                MATCH (node)-[r:APPEARED_ON]->(c:CD)
-                RETURN id(c) AS id, labels(c) AS labels 
-                ",
-
-            "  CALL {{
-                    CALL db.index.fulltext.queryNodes('artists', '{search_input}') 
-                    YIELD node, score
-                    WHERE '{search_mask}' = 'all' or '{search_mask}' = 'artists'
-                    RETURN node, score
-                    UNION 
-                    CALL db.index.fulltext.queryNodes('songs', '{search_input}') 
-                    YIELD node, score
-                    WHERE '{search_mask}' = 'all' or '{search_mask}' = 'songs'
-                    RETURN node, score
-                    UNION 
-                    CALL db.index.fulltext.queryNodes('albums', '{search_input}') 
-                    YIELD node, score
-                    WHERE '{search_mask}' = 'all' or '{search_mask}' = 'albums'
-                    RETURN node, score
-                }}
-
-                WITH node, score
-                ORDER BY score desc
-                LIMIT 100
-                MATCH (node)-[r:APPEARED_ON]->(c:CD)
-                RETURN id(node) AS source, id(c) AS target, type(r) AS type 
-            "
-        )
-        YIELD
-          graphName, nodeCount AS nodes, relationshipCount AS rels
-        RETURN graphName, nodes, rels
+        query_create = """
+        WITH $user_id as userId
+        CALL gds.eigenvector.stream('searchdomain_preference')
+        YIELD nodeId, score
+        WITH gds.util.asNode(nodeId).id AS nodeId, score, userId
+        MATCH (c:CD {id: nodeId})
+        MATCH (u:User {id: userId})
+        MERGE (c)<-[r:PREFERRES {score: score}]-(u)
         """
 
-        self.session.run(query_cont_create_proj)
+        with self.driver.session(database=self.database_name) as session:
 
+            # Check if projection exists
+            results = session.run(query_check, user_id=user_id)
+            graph_exists = bool(results.single()["exists"])
 
-    def calcContScore(self):
+            if graph_exists:
+                results = session.run(query_delete, user_id=user_id)
+                results = session.run(query_create, user_id=user_id)
 
-        # https://neo4j.com/docs/graph-data-science/current/algorithms/eigenvector-centrality/
-        query_cont_calc_score = """
-        CALL gds.eigenvector.mutate('searchdomain_content',  {
-          mutateProperty: 'score_eig'
-        })
-        YIELD centralityDistribution, nodePropertiesWritten, ranIterations
-        RETURN centralityDistribution.min AS minimumScore, 
-        centralityDistribution.mean AS meanScore, nodePropertiesWritten
+    # ---------------------------------------------------------------------------
+
+    def calcPreferredGenre(self, user_id: int = None):
+
+        ####### DELETE EXISTING RELATIONS #######
+
+        query_delete = """
+        WITH $user_id as userID
+        MATCH (:User {id: userID})-[r:PREFERRES]->(g:Genre)
+        DELETE r
         """
 
-        self.session.run(query_cont_calc_score)
+        ####### CREATE NEW RELATIONS #######
 
+        query_create = """
+        WITH $user_id as userID
 
-    def getResults(self):
-
-        query_results = """
+        // Determine total count for normalization
         CALL {
-
-            CALL {
-                CALL gds.eigenvector.stream('searchdomain_content')
-                YIELD nodeId, score
-                WHERE gds.util.asNode(nodeId):CD
-                WITH gds.util.asNode(nodeId).id AS nodeId, score as score_cont
-                RETURN nodeId, score_cont
-            }
-            RETURN nodeId, score_cont, 0 as score_pref
-
-            UNION 
-
-            CALL {
-                CALL gds.eigenvector.stream('searchdomain_preference')
-                YIELD nodeId, score
-                WHERE gds.util.asNode(nodeId):CD
-                WITH gds.util.asNode(nodeId).id AS nodeId, score as score_pref
-                RETURN nodeId, score_pref
-            }
-            RETURN nodeId, 0 as score_cont, score_pref
-
+            MATCH (u:User)-[r1:LIKES]->(n:Album)
+            MATCH (n)-[r2:APPEARED_ON]-(c:CD)
+            MATCH (c)-[:BELONGS_TO]->(g:Genre)
+            WHERE u.id = 1
+            RETURN COUNT(DISTINCT c.id) as countTotal
         }
 
-        WITH DISTINCT nodeId, count(*) as count, sum(score_cont) as score_cont, sum(score_pref) as score_pref
+        // Determine count per genre
+        MATCH (u:User)-[r1:LIKES]->(n:Album)
+        MATCH (n)-[r2:APPEARED_ON]-(c:CD)
+        MATCH (c)-[:BELONGS_TO]->(g:Genre)
+        WHERE u.id = userID
+        WITH g, c, u, countTotal, userID
+        WITH
+            DISTINCT g.id as id, g.genre as genre, u, g,
+            count(DISTINCT c.id) as countGenre, countTotal,
+            userID
+        WITH id, genre, userID, u, g,  countGenre, countTotal,
+        (toFloat(countGenre) / toFloat(countTotal)) as prob
 
-        MATCH (n:CD)
-        WHERE n.id = nodeId
-        OPTIONAL MATCH (n)-[:CONTAINS]->(ar:Artist)
-        OPTIONAL MATCH (n)-[:CONTAINS]->(ab:Album)
-        OPTIONAL MATCH (n)-[:CONTAINS]->(so:Song)
-
-        RETURN nodeId, 
-        count,
-        score_cont, score_pref,
-        collect(DISTINCT ar.artist) as artists,
-        collect(DISTINCT ab.album) as albums, 
-        collect(DISTINCT so.song) as songs
-
-
-        ORDER BY (2 * score_cont) + ( 1 * score_pref) DESC
-        LIMIT 10
+        // Create relation between user and genre
+        MERGE (u)-[:PREFERRES {score: prob}]->(g)
+        RETURN *
+        ORDER BY countGenre DESC
         """
 
-        dtf_data = pd.DataFrame([dict(_) for _ in self.session.run(query_results)])
-        return dtf_data
+        with self.driver.session(database=self.database_name) as session:
+            results = session.run(query_delete, user_id=user_id)
+            results = session.run(query_create, user_id=user_id)
 
+    # ---------------------------------------------------------------------------
 
-    def searchInGraph(self, user_id: int = 1, search_input: str = "", search_mask: str = "all"):
+    def processUserPreference(self):
 
-        # Make sure user exists
-        self.createUser(user_id)
+        query = """
+        MATCH (u:User)
+        RETURN u.id as userID
+        """
 
-        # Preference
-        self.deletePrefProj()
-        self.createPrefProj()
-        self.calcPrefScore()
+        with self.driver.session(database=self.database_name) as session:
+            results = session.run(query)
+            for row in results:
+                user_id = row["userID"]
+                print(f"Precompute Preferences for User {user_id}")
+                self.loadUserPreferences(user_id=user_id)
+                self.calcPreferredCD(user_id=user_id)
+                self.calcPreferredGenre(user_id=user_id)
 
-        # Match with query 
-        self.deleteContProj()
-        self.createContProj(search_input, search_mask)
-        self.calcContScore()
+    # ---------------------------------------------------------------------------
+    #                            STAGE 2: SEARCH BY QUERY
+    # ---------------------------------------------------------------------------
 
-        return self.getResults()     
+    def searchFor(self, user_id=1, search_input="", search_mask="all", limit=10):
 
+        query = """// Search input
+        WITH
+        //1 as userID,
+        //'Jimi Hendrix purple haze are you experienced' as searchQuery,
+        //'Ludwig van Beethoven Für Elise Symphony' as searchQuery,
+        //'all' as searchMask
+        $user_id as userID,
+        $search_input as searchQuery,
+        $search_mask as searchMask
 
+        // Find matching artists, songs and albums
+        // based on text similarity
+        CALL {
+            // Artists
+            WITH searchQuery, searchMask
+            CALL db.index.fulltext.queryNodes('artists', searchQuery)
+            YIELD node, score
+            WHERE searchMask = 'all' or searchMask = 'artists'
+            RETURN node, score
+            UNION
 
+            // Songs
+            WITH searchQuery, searchMask
+            CALL db.index.fulltext.queryNodes('songs', searchQuery)
+            YIELD node, score
+            WHERE searchMask = 'all' or searchMask = 'songs'
+            RETURN node, score
+            UNION
+
+            // Albums
+            WITH searchQuery, searchMask
+            CALL db.index.fulltext.queryNodes('albums', searchQuery)
+            YIELD node, score
+            WHERE searchMask = 'all' or searchMask = 'albums'
+            RETURN node, score
+        }
+        WITH node, score, userID
+        MATCH (node)-[r:APPEARED_ON]->(c:CD)
+        WITH DISTINCT c.id as id, c,  sum(score) as score_content, userID
+
+        // Get more information about the CDs
+        MATCH (c)-[:CONTAINS]->(ar:Artist)
+        MATCH (c)-[:CONTAINS]->(ab:Album)
+        MATCH (c)-[:CONTAINS]->(so:Song)
+        MATCH (c)-[:BELONGS_TO]->(ge:Genre)
+        OPTIONAL MATCH (c)<-[r:PREFERRES]-(u:User {id: userID})
+        OPTIONAL MATCH (ge)<-[r2:PREFERRES]-(u2:User {id: userID})
+
+        // Compile final list of search results
+        RETURN
+        id, userID as user, score_content, sum(r.score) as score_pref, r2.score as score_genre ,
+        score_content + (sum(r.score)  * score_content) + (COALESCE(r2.score, 0)  * score_content) as score_combined,
+        collect(DISTINCT ge.genre) as genres,
+        collect(DISTINCT ar.artist) as artists,
+        collect(DISTINCT ab.album) as albums,
+        collect(DISTINCT so.song) as songs
+
+        ORDER BY score_combined DESC
+        LIMIT 100"""
+
+        results = pd.DataFrame([dict(_) for _ in self.session.run(query, user_id=user_id,
+                                                                  search_input=search_input,
+                                                                  search_mask=search_mask)])
+        return results.head(limit)
